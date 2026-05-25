@@ -1,0 +1,33 @@
+{
+  "unit_name": "Voyager-1",
+  "unit_id": "VOY-RV-001",
+  "hardware": {
+    "chassis": "Vector-X1",
+    "cameras": 5,
+    "camera_config": [
+      {"name": "front", "id": 0, "fov": 120},
+      {"name": "front_left", "id": 1, "fov": 90},
+      {"name": "front_right", "id": 2, "fov": 90},
+      {"name": "rear_left", "id": 3, "fov": 90},
+      {"name": "rear_right", "id": 4, "fov": 90}
+    ],
+    "clutch": {
+      "type": "7-speed",
+      "logic": "manual-sequential",
+      "gears": 7
+    },
+    "pico_bridge": {
+      "port": "/dev/ttyACM0",
+      "baud_rate": 115200
+    }
+  },
+  "navigation": {
+    "max_speed": 15.0,
+    "gps_accuracy_threshold": 0.02
+  },
+  "safety": {
+    "estop_physical": true,
+    "estop_remote": true,
+    "watchdog_timeout_ms": 500
+  }
+}
