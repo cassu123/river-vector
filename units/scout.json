@@ -1,0 +1,47 @@
+{
+  "unit_name": "Scout-1",
+  "unit_id": "SCT-RV-001",
+  "platform": "robot",
+  "hardware": {
+    "drive": {
+      "type": "differential",
+      "gears": 1,
+      "max_speed_kmh": 5.0,
+      "turn_radius_m": 0.3
+    },
+    "deck": {
+      "width_inches": 21,
+      "type": "electric",
+      "height_adjustable": false
+    },
+    "operator_presence": {
+      "type": "none",
+      "required_for_auto": false
+    },
+    "cameras": 2,
+    "camera_config": [
+      {"name": "front", "id": 0, "fov": 120},
+      {"name": "rear",  "id": 1, "fov": 90}
+    ],
+    "pico_bridge": {
+      "port": "/dev/ttyACM0",
+      "baud_rate": 115200
+    },
+    "power": {
+      "type": "electric",
+      "battery_cells": 5,
+      "nominal_voltage_v": 20.0,
+      "min_voltage_v": 16.5
+    }
+  },
+  "navigation": {
+    "max_speed_kmh": 5.0,
+    "turn_radius_m": 0.3,
+    "gps_accuracy_threshold_m": 0.05
+  },
+  "safety": {
+    "estop_physical": true,
+    "estop_remote": true,
+    "watchdog_timeout_ms": 500
+  }
+}

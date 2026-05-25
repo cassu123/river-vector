@@ -1,0 +1,46 @@
+{
+  "unit_name": "Ryobi-Push-1",
+  "unit_id": "RYO-RV-001",
+  "platform": "push",
+  "hardware": {
+    "drive": {
+      "type": "direct_electric",
+      "gears": 1,
+      "max_speed_kmh": 6.0,
+      "turn_radius_m": 0.5
+    },
+    "deck": {
+      "width_inches": 21,
+      "type": "electric",
+      "height_adjustable": true
+    },
+    "operator_presence": {
+      "type": "handle_grip",
+      "required_for_auto": true
+    },
+    "cameras": 1,
+    "camera_config": [
+      {"name": "front", "id": 0, "fov": 120}
+    ],
+    "pico_bridge": {
+      "port": "/dev/ttyACM0",
+      "baud_rate": 115200
+    },
+    "power": {
+      "type": "electric",
+      "battery_cells": 2,
+      "nominal_voltage_v": 40.0,
+      "min_voltage_v": 33.0
+    }
+  },
+  "navigation": {
+    "max_speed_kmh": 6.0,
+    "turn_radius_m": 0.5,
+    "gps_accuracy_threshold_m": 0.05
+  },
+  "safety": {
+    "estop_physical": true,
+    "estop_remote": true,
+    "watchdog_timeout_ms": 500
+  }
+}

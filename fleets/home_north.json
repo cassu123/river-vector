@@ -1,0 +1,41 @@
+{
+  "fleet_id": "FLEET-HOME-001",
+  "fleet_name": "Home North Property",
+  "description": "Three-unit mixed fleet covering the north yard. Voyager-1 handles the main field, Scout covers tight corners, Ryobi handles the side strip.",
+  "units": [
+    {
+      "unit_id": "VOY-RV-001",
+      "unit_name": "Voyager-1",
+      "platform": "riding",
+      "profile": "units/voyager.json",
+      "home_position": {"lat": 40.712800, "lng": -74.006000}
+    },
+    {
+      "unit_id": "SCT-RV-001",
+      "unit_name": "Scout-1",
+      "platform": "robot",
+      "profile": "units/scout.json",
+      "home_position": {"lat": 40.712810, "lng": -74.005990}
+    },
+    {
+      "unit_id": "RYO-RV-001",
+      "unit_name": "Ryobi-Push-1",
+      "platform": "push",
+      "profile": "units/push_ryobi.json",
+      "home_position": {"lat": 40.712820, "lng": -74.005980}
+    }
+  ],
+  "boundary": [
+    {"lat": 40.713000, "lng": -74.006200},
+    {"lat": 40.713000, "lng": -74.005600},
+    {"lat": 40.712500, "lng": -74.005600},
+    {"lat": 40.712500, "lng": -74.006200},
+    {"lat": 40.713000, "lng": -74.006200}
+  ],
+  "schedule": {
+    "timezone": "America/New_York",
+    "windows": [
+      {"days": ["monday", "thursday"], "start": "08:00", "end": "12:00"}
+    ]
+  }
+}
