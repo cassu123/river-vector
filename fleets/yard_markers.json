@@ -1,0 +1,47 @@
+{
+  "survey_id": "HOME-NORTH-001",
+  "description": "North yard ArUco ground markers — RTK surveyed positions",
+  "notes": "Markers must be flat on the ground (height_m=0.0). Print at 20cm×20cm, laminate, stake flush to ground. Use ArUco DICT_4X4_50. IDs 10–19 reserved for yard markers (0–9 reserved for dock).",
+  "markers": [
+    {
+      "id": 10,
+      "label": "NW corner stake",
+      "lat": 40.712980,
+      "lng": -74.006180,
+      "height_m": 0.0,
+      "notes": "Northwest corner, near fence post"
+    },
+    {
+      "id": 11,
+      "label": "NE corner stake",
+      "lat": 40.712980,
+      "lng": -74.005620,
+      "height_m": 0.0,
+      "notes": "Northeast corner, near driveway edge"
+    },
+    {
+      "id": 12,
+      "label": "SE corner stake",
+      "lat": 40.712520,
+      "lng": -74.005620,
+      "height_m": 0.0,
+      "notes": "Southeast corner"
+    },
+    {
+      "id": 13,
+      "label": "SW corner stake",
+      "lat": 40.712520,
+      "lng": -74.006180,
+      "height_m": 0.0,
+      "notes": "Southwest corner"
+    },
+    {
+      "id": 14,
+      "label": "Center north",
+      "lat": 40.712900,
+      "lng": -74.005900,
+      "height_m": 0.0,
+      "notes": "Mid-yard north — adds triangulation redundancy"
+    }
+  ]
+}

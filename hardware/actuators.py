@@ -100,6 +100,17 @@ class ActuatorManager:
         self._state.throttle_pct = clamped
         self._pico.send(PicoMessage(PicoMessageType.CMD_THROTTLE, {"value": clamped}))
 
+    def set_clutch(self, value: float) -> None:
+        """
+        Sets clutch engagement level.
+
+        Args:
+            value: 0.0 = fully engaged, 100.0 = fully disengaged.
+        """
+        self._require_enabled()
+        clamped = max(0.0, min(100.0, value))
+        self._pico.send(PicoMessage(PicoMessageType.CMD_CLUTCH, {"value": clamped}))
+
     def set_brake(self, value: float) -> None:
         """
         Sets brake pressure. Automatically cuts throttle when brake is applied.

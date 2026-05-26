@@ -165,10 +165,44 @@ class ParkingController:
     # Internal
     # ------------------------------------------------------------------
 
+    @classmethod
+    def from_calibration(cls, store, camera_name: str = "front") -> "ParkingController":
+        """
+        Constructs a ParkingController using saved intrinsic calibration data.
+
+        Loads the camera matrix and distortion coefficients from the
+        CalibrationStore for the specified camera. Falls back to default
+        values if no calibration is saved for that camera.
+
+        Args:
+            store:       CalibrationStore for the active unit.
+            camera_name: Which camera's calibration to use (default 'front'
+                         — change to 'rear_left' for rear-mounted dock marker).
+
+        Returns:
+            ParkingController with real or default camera parameters.
+        """
+        cal = store.load_intrinsic(camera_name)
+        if cal is None:
+            logger.warning(
+                "No intrinsic calibration for '%s' — ParkingController using defaults. "
+                "Run: python3 -m calibration intrinsic --unit <id> --camera %s",
+                camera_name, camera_name,
+            )
+            return cls()
+        logger.info(
+            "ParkingController loaded calibration for '%s' (RMS=%.4fpx).",
+            camera_name, cal["rms_error"],
+        )
+        return cls(
+            camera_matrix=cal["camera_matrix"].astype(np.float64),
+            dist_coeffs=cal["dist_coeffs"].astype(np.float64),
+        )
+
     def _default_camera_matrix(self) -> np.ndarray:
         """
-        Returns a default camera matrix based on CAMERA_RESOLUTION.
-        Replace with calibrated values from cv2.calibrateCamera().
+        Rough default camera matrix based on CAMERA_RESOLUTION.
+        Accuracy is poor — run intrinsic calibration to replace this.
         """
         w, h = CAMERA_RESOLUTION
         fx = fy = w  # Approximate focal length
