@@ -48,6 +48,7 @@ from safety.watchdog import Watchdog
 
 # Connectivity
 from connectivity.api_client import RiverSongClient
+from connectivity.meshtastic_beacon import MeshtasticBeacon
 
 # Telemetry
 from telemetry.alerts import AlertMonitor
@@ -206,6 +207,23 @@ class RiverVectorSystem:
             lambda r: self._estop.trigger(r.code) if r.severity.value >= 3 else None
         )
 
+        # ── 13. Meshtastic backup beacon ─────────────────────────────
+        meshtastic_port = os.environ.get("MESHTASTIC_PORT", "/dev/ttyUSB1")
+        self._beacon = MeshtasticBeacon(
+            unit_id=profile.unit_id,
+            port=meshtastic_port,
+            gps_provider=lambda: (
+                (self._gps_manager.latitude, self._gps_manager.longitude)
+                if self._gps_manager.has_fix else None
+            ),
+            battery_provider=lambda: self._sensors.battery_percent,
+            mode_provider=lambda: self._mode_manager.current_mode.name,
+            on_kill=lambda: self._estop.trigger("MESHTASTIC_KILL"),
+            on_where=None,  # beacon fires automatically on WHERE
+            cellular_quality=lambda: getattr(self, "_cellular_quality", None),
+        )
+        self._beacon.start()
+
         self._lights.indicate_idle()
         logger.info("System initialisation complete — %s ready.", profile.unit_name)
 
@@ -254,6 +272,7 @@ class RiverVectorSystem:
 
         self._mode_manager.stop()
         self._alert_monitor.stop()
+        self._beacon.stop()
         self._watchdog.disarm()
         self._drive.emergency_stop()
         self._relays.emergency_off()
