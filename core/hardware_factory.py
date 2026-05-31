@@ -1,15 +1,29 @@
 """
 River Vector - Hardware Factory
-Reads a UnitProfile and instantiates the correct concrete hardware drivers.
-The rest of the stack only ever sees the abstract interfaces.
+
+Reads the per-unit hardware config (pulled from River Song via
+config_sync) and instantiates the correct concrete hardware drivers.
+
+The rest of the stack only ever sees abstract interfaces. Missing
+hardware degrades gracefully — components are substituted with sim-mode
+implementations rather than crashing.
+
+Architecture:
+  HardwareConfig (dict from config_sync.get_hardware())
+      ↓
+  HardwareFactory.build()
+      ↓
+  HardwareSuite (concrete drivers behind abstract interfaces)
 """
+
+from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
-from core.unit_profile import UnitProfile
+from connectivity.config_sync import HardwareCapabilities
 from hardware.interfaces.drive import AbstractDriveSystem
-from hardware.interfaces.deck import AbstractDeckControl
 from hardware.interfaces.presence import AbstractOperatorPresence
 
 logger = logging.getLogger(__name__)
@@ -17,98 +31,124 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class HardwareSuite:
-    """All hardware subsystems for one mower unit, accessed through abstract interfaces."""
+    """
+    All instantiated hardware subsystems for one unit.
+
+    Components that are absent on this unit's hardware are set to None.
+    Callers must check for None before use OR rely on capabilities
+    (HardwareCapabilities) to gate access.
+    """
+
     drive: AbstractDriveSystem
     presence: AbstractOperatorPresence
-    # deck: AbstractDeckControl  — TODO: deck drivers in next pass
+    capabilities: HardwareCapabilities
 
 
 class HardwareFactory:
     """
-    Constructs a HardwareSuite from a UnitProfile.
+    Constructs a HardwareSuite from a hardware config dict.
 
-    Adding a new platform requires:
-      1. A new units/*.json profile with the new drive/presence types.
-      2. A new driver class if the hardware is genuinely novel.
-      3. A case in the relevant _build_* method below.
-    No changes to any autonomy, safety, or navigation code.
+    The hardware dict matches the schema in spec §5.1 — a flat-ish
+    structure with sub-dicts for drive, deck, pico_bridge, power, sensors,
+    cameras.
     """
 
     @staticmethod
-    def build(profile: UnitProfile, pico_bridge=None) -> HardwareSuite:
+    def build(
+        hardware: Dict[str, Any],
+        pico_bridge=None,
+    ) -> HardwareSuite:
         """
-        Builds a fully-initialized HardwareSuite for the given unit profile.
+        Builds a HardwareSuite from a hardware dict.
 
         Args:
-            profile:     Loaded UnitProfile for this unit.
-            pico_bridge: Active PicoBridge instance (may be None in test/sim mode).
+            hardware:    The hardware config dict (config_sync.get_hardware()).
+            pico_bridge: Optional PicoBridge instance.
 
         Returns:
-            HardwareSuite with concrete driver instances behind abstract interfaces.
+            A populated HardwareSuite.
         """
-        drive    = HardwareFactory._build_drive(profile, pico_bridge)
-        presence = HardwareFactory._build_presence(profile)
+        capabilities = HardwareCapabilities.from_hardware(hardware)
+        drive = HardwareFactory._build_drive(hardware, pico_bridge)
+        presence = HardwareFactory._build_presence(hardware, capabilities)
 
         logger.info(
-            "HardwareFactory: built suite for %s — drive=%s, presence=%s",
-            profile.unit_id,
+            "HardwareFactory: built suite — drive=%s, presence=%s, "
+            "cameras=%d, gps=%s, imu=%s",
             type(drive).__name__,
             type(presence).__name__,
+            capabilities.camera_count,
+            capabilities.gps_grade,
+            capabilities.has_imu,
         )
-        return HardwareSuite(drive=drive, presence=presence)
+        return HardwareSuite(
+            drive=drive,
+            presence=presence,
+            capabilities=capabilities,
+        )
 
-    # ------------------------------------------------------------------
-    # Drive system
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────
+    # Drive
+    # ──────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _build_drive(profile: UnitProfile, pico_bridge) -> AbstractDriveSystem:
-        drive_cfg = profile.hardware.drive
-        speed = drive_cfg.max_speed_kmh
+    def _build_drive(
+        hardware: Dict[str, Any], pico_bridge
+    ) -> AbstractDriveSystem:
+        drive_cfg = hardware.get("drive", {}) or {}
+        drive_type = drive_cfg.get("type", "clutch")
+        max_speed = float(drive_cfg.get("max_speed_kmh", 10.0))
+        gears = int(drive_cfg.get("gears", 1))
 
-        if drive_cfg.type == "clutch":
+        if drive_type == "clutch":
             from hardware.drivers.clutch_drive import ClutchDrive
-            return ClutchDrive(pico_bridge, max_gears=drive_cfg.gears, max_speed_kmh=speed)
+            return ClutchDrive(
+                pico_bridge,
+                max_gears=gears,
+                max_speed_kmh=max_speed,
+            )
 
-        if drive_cfg.type == "differential":
+        if drive_type == "differential":
             from hardware.drivers.differential_drive import DifferentialDrive
-            return DifferentialDrive(pico_bridge, max_speed_kmh=speed)
+            return DifferentialDrive(pico_bridge, max_speed_kmh=max_speed)
 
-        if drive_cfg.type == "direct_electric":
+        if drive_type == "direct_electric":
             from hardware.drivers.direct_electric_drive import DirectElectricDrive
-            return DirectElectricDrive(pico_bridge, max_speed_kmh=speed)
+            return DirectElectricDrive(pico_bridge, max_speed_kmh=max_speed)
 
-        if drive_cfg.type == "hydrostatic":
+        if drive_type == "hydrostatic":
             from hardware.drivers.hydrostatic_drive import HydrostaticDrive
-            return HydrostaticDrive(pico_bridge, max_speed_kmh=speed)
+            return HydrostaticDrive(pico_bridge, max_speed_kmh=max_speed)
 
         raise ValueError(
-            f"No drive driver for type '{drive_cfg.type}'. "
-            f"Add a driver in hardware/drivers/ and register it in HardwareFactory._build_drive()."
+            f"No drive driver for type '{drive_type}'. "
+            "Add a driver in hardware/drivers/ and register it here."
         )
 
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────
     # Operator presence
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _build_presence(profile: UnitProfile) -> AbstractOperatorPresence:
-        pres_cfg = profile.hardware.operator_presence
-        required = pres_cfg.required_for_auto
+    def _build_presence(
+        hardware: Dict[str, Any],
+        capabilities: HardwareCapabilities,
+    ) -> AbstractOperatorPresence:
+        presence_type = capabilities.presence_type
 
-        if pres_cfg.type == "seat_sensor":
+        # Honor the safety_floor flag in addition to the hardware
+        # declaration — the operator can require presence on a unit that
+        # has the sensor.
+        required = capabilities.has_operator_presence
+
+        if presence_type == "seat_sensor":
             from hardware.drivers.seat_sensor import SeatSensorPresence
             return SeatSensorPresence(required_for_auto=required)
 
-        if pres_cfg.type == "handle_grip":
+        if presence_type == "handle_grip":
             from hardware.drivers.handle_grip import HandleGripPresence
             return HandleGripPresence(required_for_auto=required)
 
-        if pres_cfg.type == "none":
-            from hardware.drivers.no_operator import NoOperatorPresence
-            return NoOperatorPresence()
-
-        raise ValueError(
-            f"No presence driver for type '{pres_cfg.type}'. "
-            f"Add a driver in hardware/drivers/ and register it in HardwareFactory._build_presence()."
-        )
+        # presence_type == "none" — robot/autonomous units have no operator.
+        from hardware.drivers.no_operator import NoOperatorPresence
+        return NoOperatorPresence()

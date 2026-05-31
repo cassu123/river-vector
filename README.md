@@ -1,220 +1,159 @@
 # River Vector
 
-The **River Vector** Autonomy Suite is a Python-based autonomous mower control system that runs on Raspberry Pi hardware. It handles navigation, safety, telemetry, multi-unit fleet coordination, and connectivity back to River Song.
+The **River Vector** Autonomy Suite is the universal control program for any autonomous mower in the River Song fleet. One codebase, configured per-unit via the River Song web interface — no `.json` files to edit on the device.
 
-River Vector is a sub-program of the **River Song AI Ecosystem** — it registers with River Song on boot, reports telemetry, and accepts commands from it.
-
----
-
-## Fleet — Current Units
-
-| Unit | ID | Platform | Drive | Cameras | Power |
-|---|---|---|---|---|---|
-| Voyager-1 | VOY-RV-001 | Riding mower | 7-speed clutch | 5 | Gas |
-| Scout-1 | SCT-RV-001 | Autonomous robot | Differential | 2 | Electric |
-| Ryobi-Push-1 | RYO-RV-001 | Push mower | Direct electric | 1 | Electric |
-
-Each unit loads its own JSON profile from `units/` at startup. All hardware falls back to sim mode when physical devices are unavailable, so the system runs on any machine for testing.
+River Vector is a sub-program of the **River Song AI Ecosystem**. It claims with River Song on first boot, pulls its operational config, registers with River Song, reports telemetry, and accepts commands.
 
 ---
 
-## Repository Structure
+## How it works
 
 ```
-core/           Main orchestrator, config, constants, hardware factory
-hardware/
-  drivers/      Drive implementations: clutch, differential, direct electric, hydrostatic
-  interfaces/   Abstract interfaces: drive, deck, operator presence
-  actuators.py  Actuator control
-  cameras.py    Camera management (OpenCV)
-  display.py    Nextion 3.5" touchscreen operator panel (UART)
-  gps.py        GPS interface
-  lights.py     Status lights
-  pico_bridge.py  UART link to RP2040 co-processor
-  relays.py     Power relay control
-  sensors.py    Sensor aggregation (voltage, temp, fuel, ultrasonic, IMU, RPM)
-safety/         E-stop, fault manager, interlocks, watchdog
-navigation/     Path planner, boundary enforcement, GPS manager, parking/docking
-autonomy/       Mode manager, mow session, return home, shift controller
-telemetry/      Collector, logger, alert monitor
+┌──────────────────────┐                       ┌─────────────────────┐
+│  River Song          │ ◄── HTTP POST (5–30s) │ River Vector (Pi)   │
+│  riversongai.com     │     telemetry         │  one universal code │
+│                      │ ◄── long-poll (~100ms)│  per unit:          │
+│  Setup wizard        │     commands          │   - Bootstrap +     │
+│  Zone editor         │ ──► claim handshake   │     unit identity   │
+│  Program builder     │     (mDNS + code)     │   - Config pulled   │
+│  Live fleet view     │ ──► config bundle     │     from server     │
+│  Schedules           │     (hardware,        │   - Hardware built  │
+│                      │     safety floors,    │     from config     │
+│                      │     zones, program)   │   - Autonomy local  │
+└──────────────────────┘                       └─────────────────────┘
+```
+
+- **Hardware is declared, not assumed.** Cameras, GPS, IMU, fuel sensor — all optional. Missing hardware degrades gracefully.
+- **Safety floors are enforced on-device.** River Song stores what the operator configured; the device enforces absolute minimums regardless of what the server pushes.
+- **Mowing survives a server outage.** The last-pulled config is cached locally; telemetry is queued and replayed on reconnect.
+
+For the complete protocol, data model, and per-component design, see [`docs/RIVER_VECTOR_INTEGRATION_SPEC.md`](docs/RIVER_VECTOR_INTEGRATION_SPEC.md).
+
+---
+
+## Provisioning a new mower
+
+A freshly flashed Pi runs through this sequence:
+
+1. `sudo ./scripts/install.sh install` — creates `/etc/river-vector/`, `/var/lib/river-vector/`, `/var/log/river-vector/`, the service user, and the systemd unit.
+2. `sudo ./scripts/install.sh add-wifi <ssid> <password>` — adds a WiFi network (PSK encrypted at rest). Repeat for each network the mower should know (home WiFi, phone hotspot, etc.).
+3. `sudo systemctl start river-vector` — service starts.
+4. On boot, the device auto-generates a `unit_id`, broadcasts mDNS, and displays a 6-digit claim code.
+5. Open `https://riversongai.com` → Fleet → Discovered Devices → Claim → enter the code.
+6. The setup wizard prompts for: identity, drive system, deck, hardware present (cameras, GPS type, sensors), power, safety floors, and home position.
+7. Once saved, the device pulls its config, builds hardware, and enters `IDLE`.
+
+All settings are editable post-setup from the unit detail page in River Song.
+
+---
+
+## Operating states
+
+| State | Meaning |
+|---|---|
+| `UNCLAIMED` | First boot — has identity, no River Song association. |
+| `CLAIMING` | mDNS broadcasting, awaiting claim code verification. |
+| `SETUP_PENDING` | Claimed but no operational config yet. |
+| `IDLE` | Configured. Ready to accept commands. |
+| `MANUAL` | Operator-driven or teleoperated. |
+| `AUTO` | Autonomous mowing session in progress. |
+| `RETURNING_HOME` | Autonomous return-to-home navigation. |
+| `ESTOP` | Emergency stop active. All motion halted. |
+| `FAULT` | Critical fault preventing operation. |
+| `OFFLINE_REPLAY` | Server unreachable; running cached config. |
+| `TEACH` | Boundary teach mode active. |
+
+---
+
+## Repository structure
+
+```
+core/
+  bootstrap.py      Device-local bootstrap (/etc/river-vector/bootstrap.json)
+  identity.py       unit_id generation + claim state machine
+  hardware_factory.py  Reads per-unit config, builds the right drivers
+  main.py           Entry point, boot sequence, run loop
+  constants.py      ONLY universal constants (absolute floors, paths, protocol)
+
 connectivity/
-  api_client.py   River Song REST API client (WireGuard VPN)
-  cellular.py     Cellular connectivity management
-  meshtastic_beacon.py  LoRa mesh backup beacon (Meshtastic)
-  stream_manager.py     Video/telemetry streaming
-  vpn.py          WireGuard VPN management
-pico/
-  firmware/     RP2040 MicroPython firmware (sensor read, actuator drive, LED)
-  protocol.py   Host-side Pico message protocol
-calibration/    Camera calibration suite (intrinsic + extrinsic, multi-camera stitch)
-fleet/          Multi-unit coordinator, unit registry, zone partitioner
-units/          Unit profile JSON files (voyager.json, scout.json, push_ryobi.json)
-fleets/         Zone and boundary definitions
-tests/          Unit tests
+  api_client.py        River Song REST client (token-authenticated)
+  config_sync.py       Pulls + caches operational config
+  command_stream.py    Long-poll command receiver (sub-100ms latency)
+  telemetry_thread.py  State-cadenced telemetry pusher with offline replay
+  connectivity_probe.py Active server URL + tier reporting
+  wifi_manager.py      Pre-agreed SSID list, joins highest-priority available
+  mdns_advertise.py    Broadcasts presence during CLAIMING
+  claim_server.py      HTTP endpoint for the claim handshake
+
+safety/                E-stop, fault manager, interlocks (read per-unit floors), watchdog
+navigation/            Path planner, boundary, GPS manager, docking
+autonomy/
+  mode_manager.py      Full 12-state operating mode machine
+  mow_session.py       One mowing session lifecycle
+  return_home.py       Autonomous return-to-home
+  manual_control.py    Manual teleop with watchdog
+  teach_mode.py        GPS waypoint capture for boundary definition
+hardware/              Drivers (drive systems, sensors, cameras, Pico bridge, ...)
+telemetry/             Collector, alerts
+docs/
+  RIVER_VECTOR_INTEGRATION_SPEC.md  Full system specification (READ THIS FIRST)
+scripts/
+  install.sh           Provisioning, WiFi setup, reset
+units/
+  example.json         Bootstrap template
+tests/                 unittest + pytest
 ```
 
 ---
 
-## Hardware
+## Bootstrap file format
 
-### Per mower unit (Pi 5 recommended)
-- **Raspberry Pi 5** — main compute: navigation, cameras, autonomy
-- **Raspberry Pi Pico (RP2040)** — low-level bridge: sensor read, actuator drive, LEDs (UART to Pi)
-- **GPS module** — RTK-capable recommended (2 cm accuracy target for Voyager)
-- **Cameras** — USB or CSI, one per configured camera slot
-- **Nextion 3.5" display** — operator panel, UART via `/dev/ttyUSB0` (optional — sim mode if absent)
-- **Meshtastic LoRa module** — backup beacon and kill switch, UART via `/dev/ttyUSB1` (optional)
+A device's `/etc/river-vector/bootstrap.json` contains *only* what the device cannot derive itself:
 
-### System deps (install on the Pi)
-```bash
-sudo apt install python3 python3-pip python3-venv python3-opencv libopencv-dev
-sudo usermod -aG dialout $USER   # serial port access for Pico/display/Meshtastic
+```json
+{
+  "protocol_version": 1,
+  "unit_id": "RV-A1B2C3D4-9F2E",
+  "claim_state": "CLAIMED",
+  "unit_token": "<issued at claim>",
+  "firmware_version": "0.2.0",
+  "server": {
+    "url_primary":  "https://riversongai.com",
+    "url_fallback": "http://192.168.1.221:8000"
+  },
+  "wifi_networks": [
+    {"ssid": "<home>",       "psk_encrypted": "...", "priority": 1},
+    {"ssid": "<phone-hotspot>", "psk_encrypted": "...", "priority": 2}
+  ]
+}
 ```
+
+Everything else — hardware specs, safety floors, zones, programs — lives in River Song and is pulled via `GET /api/vector/config/{unit_id}`.
 
 ---
 
-## Running on Raspberry Pi
+## Connectivity hierarchy
 
-### 1. Clone and install
-```bash
-git clone https://github.com/yourusername/river-vector.git
-cd river-vector
-python3 -m venv .venv
-source .venv/bin/activate
+1. **Primary** — `url_primary` (internet → Cloudflare Tunnel → River Song).
+2. **Fallback** — `url_fallback` (LAN direct, used when internet is down but WiFi LAN is up).
+3. **Offline** — Last cached config used; telemetry queued.
+4. **Meshtastic** (optional) — LoRa beacon for GPS broadcast + remote kill only.
+
+The active tier is reported on every telemetry push (`connectivity_tier` field).
+
+---
+
+## Running tests
+
+```
 pip install -r requirements.txt
+python3 -m pytest tests/
 ```
 
-> **Note on OpenCV:** If `opencv-python` fails to build on your Pi, replace it with the system package instead:
-> ```bash
-> pip install --no-deps opencv-python  # or skip it — the apt package above covers it
-> ```
-
-### 2. Configure environment
-```bash
-export RIVER_SONG_API_KEY="your-api-key"          # from River Song admin panel
-export RIVER_VECTOR_UNIT="units/voyager.json"     # which unit profile to load
-export MESHTASTIC_PORT="/dev/ttyUSB1"             # LoRa module port (optional)
-```
-
-Create a `.env` file to persist these across reboots, or add them to the systemd service below.
-
-### 3. Select a unit and run
-
-List all available units:
-```bash
-python3 -m core.main --list
-```
-```
-NAME                 ID             PLATFORM   DRIVE            CAMERAS
-----------------------------------------------------------------------
-Ryobi-Push-1         RYO-RV-001     push       direct_electric  1
-Scout-1              SCT-RV-001     robot      differential     2
-Voyager-1            VOY-RV-001     riding     clutch           5
-```
-
-Run a specific unit:
-```bash
-python3 -m core.main --unit voyager
-python3 -m core.main --unit scout
-python3 -m core.main --unit push_ryobi
-```
-
-You can also point directly at a profile file:
-```bash
-python3 -m core.main --unit units/voyager.json
-python3 -m core.main --unit /path/to/my_custom_unit.json
-```
-
-The `--unit` flag overrides the `RIVER_VECTOR_UNIT` env var. If neither is set, Voyager is the default.
-
-The system loads the unit profile, initialises all subsystems (hardware falls back to sim mode if not present), registers with River Song, and enters the main loop at 10 Hz.
-
-### 4. Run as a systemd service (auto-start on boot)
-Create `/etc/systemd/system/river-vector.service`:
-```ini
-[Unit]
-Description=River Vector Autonomy Suite
-After=network.target
-
-[Service]
-User=pi
-WorkingDirectory=/home/pi/river-vector
-EnvironmentFile=/home/pi/river-vector/.env
-ExecStart=/home/pi/river-vector/.venv/bin/python3 -m core.main --unit voyager
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-```bash
-sudo systemctl enable river-vector
-sudo systemctl start river-vector
-sudo journalctl -u river-vector -f   # follow logs
-```
+All hardware falls back to sim mode on dev machines, so the suite runs without a Pi.
 
 ---
 
-## Unit Profiles
+## Integration with River Song
 
-Select which unit to run by setting `RIVER_VECTOR_UNIT`:
-
-```bash
-RIVER_VECTOR_UNIT=units/voyager.json python3 -m core.main    # Voyager-1 (default)
-RIVER_VECTOR_UNIT=units/scout.json python3 -m core.main      # Scout-1
-RIVER_VECTOR_UNIT=units/push_ryobi.json python3 -m core.main # Ryobi-Push-1
-```
-
-The profile drives hardware selection at runtime — drive type, camera count, operator presence, power type, and safety timeouts are all unit-specific.
-
----
-
-## Adding a New Unit
-
-1. Copy an existing profile from `units/` and edit it:
-   ```bash
-   cp units/voyager.json units/my_mower.json
-   ```
-2. Set the fields for your hardware — `drive.type`, `platform`, camera count, power type, etc.
-3. Run `python3 -m core.main --list` to confirm it appears.
-4. Run it: `python3 -m core.main --unit my_mower`
-
-**Valid values** (the loader validates these and rejects unknown ones):
-- `drive.type`: `clutch`, `differential`, `direct_electric`, `hydrostatic`
-- `platform`: `riding`, `robot`, `push`
-- `deck.type`: `pto`, `electric`, `belt`
-- `operator_presence.type`: `seat_sensor`, `handle_grip`, `none`
-- `power.type`: `gas`, `electric`
-
-If your hardware uses a genuinely different drive mechanism not in that list, add a driver class in `hardware/drivers/` and register it in `HardwareFactory._build_drive()` — no other code needs to change.
-
----
-
-## Camera Calibration
-
-Run the interactive calibration tool (display required or sim mode):
-
-```bash
-python3 -m calibration
-```
-
-Calibration data is saved to `calibration_data/`. Results persist across reboots and are loaded automatically by the camera manager.
-
----
-
-## Tests
-
-```bash
-pytest tests/
-```
-
----
-
-## Safety
-
-River Vector contains autonomous control logic connected to physical actuators. Before deploying on any unit:
-
-- Ensure a physical E-stop is accessible and tested before every run.
-- The watchdog timeout is 500 ms — if the main loop hangs, the system triggers an automatic E-stop.
-- Remote E-stop is available via River Song command (`action: estop`) and via Meshtastic kill command over LoRa mesh.
-- Never bypass interlocks for testing — use sim mode instead (`RIVER_VECTOR_UNIT` pointing to a unit profile with `required_for_auto: false`).
+The River Song side of this integration is implemented in the [RiverSongAI](https://github.com/cassu123/RiverSongAI) repository per the same spec at `docs/RIVER_VECTOR_INTEGRATION_SPEC.md`. The device-facing API surface (`/api/vector/*`) and the operator-facing fleet UI (`/fleet`, `/fleet/zones`, `/fleet/programs`, etc.) are documented there.

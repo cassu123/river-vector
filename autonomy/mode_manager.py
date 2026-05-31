@@ -26,18 +26,33 @@ logger = logging.getLogger(__name__)
 
 class OperatingMode(Enum):
     """
-    Operating modes for River Vector.
+    Operating modes for River Vector. Full state model per spec §2.
 
-    MANUAL:   Human operator has full control. Autonomous systems are idle.
-    AUTO:     Autonomous mowing session active. Safety layer monitors continuously.
-    ESTOP:    Emergency stop active. All motion halted. Requires manual reset.
-    FAULT:    Non-fatal fault state. Autonomous paused. Manual still available.
-    SHUTDOWN: System is shutting down.
+    UNCLAIMED:       First boot / factory reset. No River Song association.
+    CLAIMING:        mDNS broadcasting, awaiting claim verification.
+    SETUP_PENDING:   Claimed but no operational config yet (or config invalid).
+    IDLE:            Configured and ready. Engine off or parked.
+    MANUAL:          Operator-driven or teleoperated.
+    AUTO:            Autonomous mowing session active.
+    RETURNING_HOME:  Autonomous return-to-home navigation.
+    ESTOP:           Emergency stop active. All motion halted.
+    FAULT:           Critical fault preventing operation.
+    OFFLINE_REPLAY:  Server unreachable; running cached config, queuing telemetry.
+    TEACH:           Boundary teach mode active.
+    SHUTDOWN:        System shutdown in progress.
     """
+
+    UNCLAIMED = auto()
+    CLAIMING = auto()
+    SETUP_PENDING = auto()
+    IDLE = auto()
     MANUAL = auto()
     AUTO = auto()
+    RETURNING_HOME = auto()
     ESTOP = auto()
     FAULT = auto()
+    OFFLINE_REPLAY = auto()
+    TEACH = auto()
     SHUTDOWN = auto()
 
 
@@ -67,13 +82,14 @@ class ModeManager:
         fault_manager: FaultManager,
         interlocks=None,
         poll_interval: float = POLL_INTERVAL_SEC,
+        initial_mode: OperatingMode = OperatingMode.UNCLAIMED,
     ) -> None:
         if fault_manager is None:
             raise ValueError("fault_manager must not be None.")
         self._fault_manager = fault_manager
         self._interlocks = interlocks
         self._poll_interval = poll_interval
-        self._mode = OperatingMode.MANUAL
+        self._mode = initial_mode
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -158,7 +174,7 @@ class ModeManager:
 
     def reset_estop(self) -> bool:
         """
-        Attempts to clear ESTOP mode and return to MANUAL.
+        Attempts to clear ESTOP mode and return to IDLE.
 
         Returns:
             True if reset was successful.
@@ -166,9 +182,19 @@ class ModeManager:
         with self._lock:
             if self._mode != OperatingMode.ESTOP:
                 return True
-        self._transition_to(OperatingMode.MANUAL)
-        logger.info("ESTOP cleared — returned to MANUAL mode.")
+        self._transition_to(OperatingMode.IDLE)
+        logger.info("ESTOP cleared — returned to IDLE mode.")
         return True
+
+    def set_mode(self, new_mode: OperatingMode) -> None:
+        """
+        Generic mode transition for lifecycle states.
+
+        Used by claim flow, config_sync, and offline-replay logic.
+        Does NOT enforce interlocks — callers are responsible for any
+        pre-conditions on lifecycle transitions.
+        """
+        self._transition_to(new_mode)
 
     # ------------------------------------------------------------------
     # Switch state injection

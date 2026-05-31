@@ -1,0 +1,24 @@
+{
+  "_comment_": "Bootstrap template. Copy to /etc/river-vector/bootstrap.json and fill in. After first boot the device generates its own unit_id; leave it empty here. WiFi PSKs must be encrypted via scripts/install.sh (do not paste plaintext).",
+  "protocol_version": 1,
+  "unit_id": "",
+  "claim_state": "UNCLAIMED",
+  "unit_token": "",
+  "firmware_version": "0.2.0",
+  "server": {
+    "url_primary": "https://riversongai.com",
+    "url_fallback": "http://192.168.1.221:8000"
+  },
+  "wifi_networks": [
+    {
+      "ssid": "ReplaceWithHomeWiFi",
+      "psk_encrypted": "",
+      "priority": 1
+    },
+    {
+      "ssid": "ReplaceWithPhoneHotspot",
+      "psk_encrypted": "",
+      "priority": 2
+    }
+  ]
+}
