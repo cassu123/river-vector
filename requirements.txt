@@ -1,12 +1,33 @@
-# River Vector Autonomy Suite Requirements
-# Note: ROS2 Humble (rclpy) is expected to be installed via system packages.
+# River Vector Autonomy Suite — Runtime Requirements
+# Python 3.10+
 
-numpy>=1.24.0
+# HTTP + retry
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Hardware / serial
 pyserial>=3.5
-meshtastic>=2.3.0       # LoRa backup beacon — optional, falls back to sim mode
-pypubsub>=4.0.3         # Required by meshtastic for message callbacks
+
+# Vision (optional — degrades to sim if missing)
 opencv-python>=4.7.0
+numpy>=1.24.0
+
+# Config / data
 pyyaml>=6.0
-requests>=2.28.0
-pytest>=7.3.0
 jsonschema>=4.17.0
+
+# Backup beacon (optional)
+meshtastic>=2.3.0
+pypubsub>=4.0.3
+
+# mDNS service advertisement (claim flow)
+zeroconf>=0.130.0
+
+# Cron expression parsing (used by tests; live cron lives server-side)
+croniter>=2.0.0
+
+# Coordinate projection (zone-local ENU frame for path planning)
+pyproj>=3.6.0
+
+# Tests
+pytest>=7.3.0

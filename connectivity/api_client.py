@@ -1,20 +1,26 @@
 """
-================================================================================
-Project:  River Vector — Autonomous Mower Control System
-File:     connectivity/api_client.py
-Purpose:  River Song API client. Handles device registration, status
-          reporting, command polling, telemetry push, and alert dispatch.
-          All communication goes through WireGuard VPN — no direct internet
-          access. Implements retry logic with exponential backoff.
-Author:   [Author Placeholder]
-Version:  0.1.0
-Date:     2026-05-25
-================================================================================
+River Vector - River Song API Client
+
+HTTP client for the River Song API. All endpoints under /api/vector/*.
+
+Responsibilities:
+  - Authenticate every request with X-Unit-Token (after claim).
+  - Resolve outbound URL via ConnectivityProbe (internet primary, LAN
+    fallback).
+  - Support batched telemetry posts for offline replay.
+  - Acknowledge and complete commands.
+  - Report session lifecycle (start/end).
+  - Push status, alerts, and events.
+
+This module does NOT implement the long-poll command stream — that lives
+in connectivity/command_stream.py.
 """
+
+from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -24,9 +30,7 @@ from core.constants import (
     API_RETRY_ATTEMPTS,
     API_RETRY_BACKOFF_SEC,
     API_TIMEOUT_SEC,
-    FaultCode,
     RIVER_SONG_API_PREFIX,
-    RIVER_SONG_BASE_URL,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,241 +40,308 @@ class APIError(Exception):
     """Raised when a River Song API call fails after all retries."""
 
 
+class AuthError(APIError):
+    """Raised on 401/403 responses. Caller should drop to UNCLAIMED."""
+
+
+class OfflineError(APIError):
+    """Raised when no server URL is currently reachable."""
+
+
 class RiverSongClient:
     """
     HTTP client for the River Song API.
 
-    Handles all communication between River Vector and riversongai.com.
-    Uses a persistent requests.Session with retry logic. All requests
-    include the unit_id and API key in headers.
-
     Args:
-        config: MowerConfig with unit_id and river_song_api_key.
-        base_url: River Song API base URL (default from constants).
+        identity:  Identity instance — provides unit_id and unit_token.
+        probe:     ConnectivityProbe instance — provides active server URL.
     """
 
-    def __init__(self, config, base_url: str = RIVER_SONG_BASE_URL) -> None:
-        if config is None:
-            raise ValueError("config must not be None.")
-        self._config = config
-        self._base_url = base_url.rstrip("/")
+    def __init__(self, identity, probe) -> None:
+        if identity is None:
+            raise ValueError("identity must not be None.")
+        if probe is None:
+            raise ValueError("probe must not be None.")
+        self._identity = identity
+        self._probe = probe
         self._prefix = RIVER_SONG_API_PREFIX
         self._session = self._build_session()
-        self._registered = False
 
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────
     # Registration
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────
 
-    def register(self) -> bool:
+    def register(
+        self,
+        firmware_version: str,
+        auto_detected_hardware: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """
-        Registers this unit with River Song on boot.
+        Announces the device to River Song on boot.
 
-        Sends unit profile data to POST /api/vector/register.
-        River Song uses this to create or update the device node.
-
-        Returns:
-            True if registration succeeded.
+        The new payload is minimal — hardware specs are no longer sent
+        TO the server; they are pulled FROM the server via config_sync.
+        We just tell the server we are alive and how we found it.
         """
         payload = {
-            "unit_id": self._config.unit_id,
-            "name": self._config.name,
-            "platform": self._config.platform,
-            "transmission": self._config.transmission,
-            "deck_width_inches": self._config.deck_width_inches,
-            "hardware": self._config.hardware,
-            "features": self._config.features,
-            "unit_config": self._config.unit_config,
+            "unit_id": self._identity.unit_id,
+            "firmware_version": firmware_version,
+            "boot_time": _utc_iso(),
+            "connectivity_tier": self._probe.tier.value,
+            "auto_detected_hardware": auto_detected_hardware or {},
         }
         try:
-            resp = self._post("/register", payload)
-            self._registered = True
-            logger.info(
-                "Registered with River Song: unit_id=%s", self._config.unit_id
-            )
+            self._post("/register", payload)
+            logger.info("Registered with River Song: unit_id=%s", self._identity.unit_id)
             return True
+        except OfflineError:
+            logger.warning("Cannot register — server unreachable.")
+            return False
+        except AuthError:
+            logger.error("Registration auth failed — device may need re-claim.")
+            return False
         except APIError as exc:
             logger.error("Registration failed: %s", exc)
             return False
 
-    # ------------------------------------------------------------------
-    # Status
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────
+    # Config pull
+    # ──────────────────────────────────────────────────────────────────
 
-    def push_status(self, status: Dict[str, Any]) -> bool:
+    def pull_config(self) -> Optional[Dict[str, Any]]:
         """
-        Pushes current mower status to River Song.
+        Pulls the full operational config bundle. Returns None on failure.
 
-        Called by the mode manager on state transitions.
-
-        Args:
-            status: Dict with operating_mode, session_state, fault_codes, etc.
-
-        Returns:
-            True if the push succeeded.
+        config_sync.py is the caller; this method is the wire layer.
         """
         try:
-            self._post("/status", {"unit_id": self._config.unit_id, **status})
-            return True
+            return self._get(f"/config/{self._identity.unit_id}")
+        except OfflineError:
+            logger.warning("Cannot pull config — server unreachable.")
+            return None
         except APIError as exc:
-            logger.warning("Status push failed: %s", exc)
-            return False
-
-    # ------------------------------------------------------------------
-    # Telemetry
-    # ------------------------------------------------------------------
-
-    def push_telemetry(self, telemetry: Dict[str, Any]) -> bool:
-        """
-        Pushes a telemetry snapshot to River Song.
-
-        River Song stores this for dashboard display and AI analysis.
-
-        Args:
-            telemetry: TelemetrySnapshot.to_dict() output.
-
-        Returns:
-            True if the push succeeded.
-        """
-        try:
-            self._post("/telemetry", telemetry)
-            return True
-        except APIError as exc:
-            logger.warning("Telemetry push failed: %s", exc)
-            return False
-
-    # ------------------------------------------------------------------
-    # Commands
-    # ------------------------------------------------------------------
-
-    def poll_commands(self) -> Optional[Dict[str, Any]]:
-        """
-        Polls River Song for pending commands.
-
-        River Song queues commands (mow_start, mow_stop, return_home, etc.)
-        that were issued by the user or AI. This method retrieves and
-        clears the queue.
-
-        Returns:
-            Command dict if a command is pending, None otherwise.
-        """
-        try:
-            resp = self._get(f"/command/{self._config.unit_id}")
-            return resp if resp else None
-        except APIError as exc:
-            logger.debug("Command poll failed: %s", exc)
+            logger.error("Config pull failed: %s", exc)
             return None
 
-    # ------------------------------------------------------------------
-    # Alerts
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────
+    # Status / Telemetry / Alerts / Events
+    # ──────────────────────────────────────────────────────────────────
 
-    def post_alert(self, alert) -> bool:
+    def push_status(self, status: Dict[str, Any]) -> bool:
+        """Pushes operating-mode / session-state transitions."""
+        return self._safe_post("/status", {
+            "unit_id": self._identity.unit_id,
+            **status,
+        })
+
+    def push_telemetry_batch(self, snapshots: List[Dict[str, Any]]) -> bool:
         """
-        Pushes an alert to River Song for operator notification.
+        Pushes a batch of telemetry snapshots.
 
-        Args:
-            alert: Alert instance from telemetry/alerts.py.
-
-        Returns:
-            True if the push succeeded.
+        Supports up to TELEMETRY_BATCH_MAX per call. The telemetry thread
+        uses this for offline replay; single-snapshot pushes wrap in a
+        one-element list.
         """
-        try:
-            self._post("/alert", {
-                "unit_id": self._config.unit_id,
-                "level": alert.level.name,
-                "title": alert.title,
-                "message": alert.message,
-                "fault_code": alert.fault_code,
-                "timestamp": alert.timestamp,
-            })
+        if not snapshots:
             return True
-        except APIError as exc:
-            logger.warning("Alert push failed: %s", exc)
-            return False
+        payload = {
+            "unit_id": self._identity.unit_id,
+            "snapshots": snapshots,
+        }
+        return self._safe_post("/telemetry", payload)
+
+    def post_alert(self, alert: Dict[str, Any]) -> bool:
+        """Pushes an alert to River Song."""
+        return self._safe_post("/alert", {
+            "unit_id": self._identity.unit_id,
+            **alert,
+        })
 
     def post_event(self, event: str, data: Dict[str, Any]) -> bool:
-        """
-        Posts a session lifecycle event to River Song.
+        """Posts a session lifecycle event."""
+        return self._safe_post("/event", {
+            "unit_id": self._identity.unit_id,
+            "event": event,
+            **data,
+        })
 
-        Args:
-            event: Event name string (e.g. 'session_started', 'session_complete').
-            data: Event payload dict.
+    # ──────────────────────────────────────────────────────────────────
+    # Sessions
+    # ──────────────────────────────────────────────────────────────────
 
-        Returns:
-            True if the push succeeded.
+    def session_start(
+        self,
+        program_id: Optional[str],
+        config_version: int,
+    ) -> Optional[str]:
         """
+        Announces the start of a mowing session. Returns server-assigned
+        session_id, or None on failure.
+        """
+        payload = {
+            "unit_id": self._identity.unit_id,
+            "program_id": program_id,
+            "config_version": config_version,
+            "started_at": _utc_iso(),
+        }
         try:
-            self._post("/event", {
-                "unit_id": self._config.unit_id,
-                "event": event,
-                **data,
-            })
-            return True
+            resp = self._post("/session/start", payload)
+            return resp.get("session_id") if resp else None
         except APIError as exc:
-            logger.warning("Event post failed for '%s': %s", event, exc)
-            return False
+            logger.error("session_start failed: %s", exc)
+            return None
 
-    # ------------------------------------------------------------------
-    # Internal HTTP helpers
-    # ------------------------------------------------------------------
+    def session_end(
+        self,
+        session_id: str,
+        status: str,
+        area_mowed_sqm: Optional[float] = None,
+        battery_used_pct: Optional[float] = None,
+        fuel_used_pct: Optional[float] = None,
+        abort_reason: Optional[str] = None,
+    ) -> bool:
+        """Reports the end of a mowing session with totals."""
+        payload = {
+            "unit_id": self._identity.unit_id,
+            "session_id": session_id,
+            "ended_at": _utc_iso(),
+            "status": status,
+            "area_mowed_sqm": area_mowed_sqm,
+            "battery_used_pct": battery_used_pct,
+            "fuel_used_pct": fuel_used_pct,
+            "abort_reason": abort_reason,
+        }
+        return self._safe_post("/session/end", payload)
+
+    # ──────────────────────────────────────────────────────────────────
+    # Commands
+    # ──────────────────────────────────────────────────────────────────
+
+    def ack_command(self, command_id: str) -> bool:
+        """Acknowledges receipt of a command (pending → acknowledged)."""
+        return self._safe_post(f"/command/{command_id}/ack", {
+            "unit_id": self._identity.unit_id,
+            "acknowledged_at": _utc_iso(),
+        })
+
+    def complete_command(
+        self,
+        command_id: str,
+        success: bool,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Reports command completion or failure."""
+        return self._safe_post(f"/command/{command_id}/complete", {
+            "unit_id": self._identity.unit_id,
+            "completed_at": _utc_iso(),
+            "status": "completed" if success else "failed",
+            "result": result or {},
+        })
+
+    # ──────────────────────────────────────────────────────────────────
+    # Boundary teach
+    # ──────────────────────────────────────────────────────────────────
+
+    def push_teach_waypoints(
+        self,
+        zone_name: str,
+        waypoints: List[Dict[str, float]],
+        finalize: bool = False,
+    ) -> bool:
+        """Pushes accumulated boundary waypoints during teach mode."""
+        return self._safe_post("/zones/teach", {
+            "unit_id": self._identity.unit_id,
+            "zone_name": zone_name,
+            "waypoints": waypoints,
+            "finalize": finalize,
+        })
+
+    # ──────────────────────────────────────────────────────────────────
+    # Internal HTTP
+    # ──────────────────────────────────────────────────────────────────
 
     def _post(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Makes a POST request to the River Song API.
-
-        Args:
-            endpoint: API endpoint path (relative to prefix).
-            payload: JSON request body.
-
-        Returns:
-            Parsed JSON response dict.
-
-        Raises:
-            APIError: If the request fails after retries.
-        """
-        url = f"{self._base_url}{self._prefix}{endpoint}"
+        """POST with full retry semantics. Raises APIError on failure."""
+        base_url = self._probe.active_url
+        if not base_url:
+            raise OfflineError("No server URL is reachable.")
+        url = f"{base_url.rstrip('/')}{self._prefix}{endpoint}"
         try:
             resp = self._session.post(
                 url,
                 json=payload,
                 timeout=API_TIMEOUT_SEC,
+                headers=self._auth_headers(),
             )
-            resp.raise_for_status()
-            return resp.json() if resp.content else {}
         except requests.RequestException as exc:
             raise APIError(f"POST {url} failed: {exc}") from exc
 
+        if resp.status_code in (401, 403):
+            raise AuthError(f"POST {url} returned {resp.status_code}")
+        if resp.status_code >= 400:
+            raise APIError(f"POST {url} returned {resp.status_code}: {resp.text[:200]}")
+
+        if resp.content:
+            try:
+                return resp.json()
+            except ValueError:
+                return {}
+        return {}
+
     def _get(self, endpoint: str) -> Optional[Dict[str, Any]]:
-        """
-        Makes a GET request to the River Song API.
-
-        Args:
-            endpoint: API endpoint path (relative to prefix).
-
-        Returns:
-            Parsed JSON response dict, or None if empty.
-
-        Raises:
-            APIError: If the request fails after retries.
-        """
-        url = f"{self._base_url}{self._prefix}{endpoint}"
+        base_url = self._probe.active_url
+        if not base_url:
+            raise OfflineError("No server URL is reachable.")
+        url = f"{base_url.rstrip('/')}{self._prefix}{endpoint}"
         try:
-            resp = self._session.get(url, timeout=API_TIMEOUT_SEC)
-            resp.raise_for_status()
-            return resp.json() if resp.content else None
+            resp = self._session.get(
+                url,
+                timeout=API_TIMEOUT_SEC,
+                headers=self._auth_headers(),
+            )
         except requests.RequestException as exc:
             raise APIError(f"GET {url} failed: {exc}") from exc
 
+        if resp.status_code in (401, 403):
+            raise AuthError(f"GET {url} returned {resp.status_code}")
+        if resp.status_code >= 400:
+            raise APIError(f"GET {url} returned {resp.status_code}")
+
+        if resp.content:
+            try:
+                return resp.json()
+            except ValueError:
+                return None
+        return None
+
+    def _safe_post(self, endpoint: str, payload: Dict[str, Any]) -> bool:
+        """POST that swallows errors and returns success bool."""
+        try:
+            self._post(endpoint, payload)
+            return True
+        except OfflineError:
+            return False
+        except AuthError:
+            logger.error("Auth failed on %s — device may need re-claim.", endpoint)
+            return False
+        except APIError as exc:
+            logger.warning("POST %s failed: %s", endpoint, exc)
+            return False
+
+    def _auth_headers(self) -> Dict[str, str]:
+        """Returns auth headers including unit_token if claimed."""
+        h = {
+            "Content-Type": "application/json",
+            "X-Unit-ID": self._identity.unit_id,
+        }
+        token = self._identity.unit_token
+        if token:
+            h["X-Unit-Token"] = token
+        return h
+
     def _build_session(self) -> requests.Session:
-        """
-        Builds a requests.Session with retry logic and auth headers.
-
-        Returns:
-            Configured requests.Session.
-        """
+        """Builds a requests.Session with retry adapter."""
         session = requests.Session()
-
         retry = Retry(
             total=API_RETRY_ATTEMPTS,
             backoff_factor=API_RETRY_BACKOFF_SEC,
@@ -280,24 +351,21 @@ class RiverSongClient:
         adapter = HTTPAdapter(max_retries=retry)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
-
-        api_key = self._config.river_song_api_key
-        if api_key:
-            session.headers.update({
-                "Authorization": f"Bearer {api_key}",
-                "X-Unit-ID": self._config.unit_id,
-                "Content-Type": "application/json",
-            })
-        else:
-            logger.warning(
-                "RIVER_SONG_API_KEY not set — API calls will be unauthenticated."
-            )
-
         return session
 
     def __repr__(self) -> str:
         return (
-            f"RiverSongClient(unit={self._config.unit_id}, "
-            f"registered={self._registered}, "
-            f"base_url={self._base_url!r})"
+            f"RiverSongClient(unit_id={self._identity.unit_id}, "
+            f"tier={self._probe.tier.value}, "
+            f"url={self._probe.active_url!r})"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _utc_iso() -> str:
+    """Returns the current UTC time in ISO 8601 with trailing Z."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
