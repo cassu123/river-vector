@@ -8,12 +8,15 @@ import logging
 import os
 from typing import Any, Dict
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_UNITS_DIR = os.path.join(os.path.dirname(__file__), "..", "units")
+_DEFAULT_PROFILE = os.path.join(_UNITS_DIR, "voyager.json")
+
+
 class Config:
-    def __init__(self, config_path: str = "/home/hoke/river-vector/units/voyager.json"):
+    def __init__(self, config_path: str = _DEFAULT_PROFILE):
         self.config_path = config_path
         self.data: Dict[str, Any] = {}
         self.load_config()
@@ -63,6 +66,3 @@ class Config:
             return value
         except (KeyError, TypeError):
             return default
-
-# Global configuration instance
-config = Config()

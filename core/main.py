@@ -5,6 +5,7 @@ Platform-agnostic: the unit profile drives hardware selection at runtime.
 All hardware falls back to sim mode when physical devices are unavailable.
 """
 
+import dataclasses
 import logging
 import os
 import signal
@@ -167,12 +168,11 @@ class RiverVectorSystem:
         self._mode_manager.start()
 
         # ── 10. Connectivity & telemetry ─────────────────────────────
-        self._api = None  # Initialised below if API key is available
+        self._cfg_shim = self._build_config_shim()
+        self._api = None
         api_key = os.environ.get("RIVER_SONG_API_KEY", "")
         if api_key:
-            from core.config import Config
-            cfg = Config()
-            self._api = RiverSongClient(cfg)
+            self._api = RiverSongClient(self._cfg_shim)
             self._api.register()
 
         self._alert_monitor = AlertMonitor(self._fault_manager, api_client=self._api)
@@ -180,12 +180,12 @@ class RiverVectorSystem:
 
         # ── 11. Path planner & sessions ──────────────────────────────
         self._path_planner = PathPlanner(
-            config=self._build_config_shim(),
+            config=self._cfg_shim,
             gps_manager=self._gps_manager,
             boundary_manager=self._boundary,
         )
         self._mow_session = MowSession(
-            config=self._build_config_shim(),
+            config=self._cfg_shim,
             fault_manager=self._fault_manager,
             relay_manager=self._relays,
             path_planner=self._path_planner,
@@ -194,7 +194,7 @@ class RiverVectorSystem:
             light_manager=self._lights,
         )
         self._return_home = ReturnHome(
-            config=self._build_config_shim(),
+            config=self._cfg_shim,
             fault_manager=self._fault_manager,
             gps_manager=self._gps_manager,
             camera_manager=self._cameras,
@@ -396,6 +396,7 @@ class RiverVectorSystem:
             transmission = profile.hardware.drive.type
             hardware = {}
             features = []
+            unit_config = dataclasses.asdict(profile)
             river_song_api_key = os.environ.get("RIVER_SONG_API_KEY", "")
             home_position = {"lat": None, "lng": None}
 
@@ -406,13 +407,75 @@ class RiverVectorSystem:
 # Entry point
 # ------------------------------------------------------------------
 
+_UNITS_DIR = os.path.join(os.path.dirname(__file__), "..", "units")
+
+
+def _list_units() -> None:
+    """Prints all unit profiles found in units/ and exits."""
+    import glob
+    files = sorted(glob.glob(os.path.join(_UNITS_DIR, "*.json")))
+    if not files:
+        print("No unit profiles found in units/")
+        return
+    print(f"{'NAME':<20} {'ID':<14} {'PLATFORM':<10} {'DRIVE':<16} {'CAMERAS'}")
+    print("-" * 70)
+    for path in files:
+        try:
+            p = UnitProfile.from_file(path)
+            print(
+                f"{p.unit_name:<20} {p.unit_id:<14} {p.platform:<10} "
+                f"{p.hardware.drive.type:<16} {p.hardware.cameras}"
+            )
+        except Exception as exc:
+            print(f"  {os.path.basename(path)}: (parse error — {exc})")
+
+
+def _resolve_unit_path(name: str) -> str:
+    """
+    Resolves a unit name or path to an absolute profile path.
+
+    Accepts:
+      - A bare name:  'voyager'  → units/voyager.json
+      - A JSON path:  'units/voyager.json' or '/abs/path/to/unit.json'
+    """
+    if name.endswith(".json"):
+        return os.path.abspath(name)
+    return os.path.abspath(os.path.join(_UNITS_DIR, f"{name}.json"))
+
+
 def main(args=None) -> None:
-    profile_path = os.environ.get("RIVER_VECTOR_UNIT", DEFAULT_PROFILE_PATH)
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="python3 -m core.main",
+        description="River Vector Autonomy Suite",
+    )
+    parser.add_argument(
+        "--unit", metavar="NAME",
+        help=(
+            "Unit to run — bare name (voyager, scout, push_ryobi) or path to "
+            "a .json profile. Overrides RIVER_VECTOR_UNIT env var."
+        ),
+    )
+    parser.add_argument(
+        "--list", action="store_true",
+        help="List all available unit profiles and exit.",
+    )
+    parsed = parser.parse_args(args)
+
+    if parsed.list:
+        _list_units()
+        return
+
+    if parsed.unit:
+        profile_path = _resolve_unit_path(parsed.unit)
+    else:
+        profile_path = os.environ.get("RIVER_VECTOR_UNIT", DEFAULT_PROFILE_PATH)
 
     try:
         profile = UnitProfile.from_file(profile_path)
     except (FileNotFoundError, ValueError) as exc:
         print(f"Fatal: could not load unit profile: {exc}", file=sys.stderr)
+        print("Run with --list to see available units.", file=sys.stderr)
         sys.exit(1)
 
     system = RiverVectorSystem(profile)

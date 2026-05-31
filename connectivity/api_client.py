@@ -80,6 +80,7 @@ class RiverSongClient:
             "deck_width_inches": self._config.deck_width_inches,
             "hardware": self._config.hardware,
             "features": self._config.features,
+            "unit_config": self._config.unit_config,
         }
         try:
             resp = self._post("/register", payload)
