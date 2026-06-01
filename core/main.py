@@ -35,6 +35,7 @@ from typing import Any, Dict, Optional
 
 # Core
 from core.bootstrap import BootstrapNotFoundError, BootstrapInvalidError, load_bootstrap
+from core.compute_topology import ComputeTopologyError, ROLE_CONTROL, ROLE_VISION
 from core.constants import (
     BOOTSTRAP_PATH,
     DEFAULT_NODE_NAME,
@@ -73,13 +74,14 @@ from autonomy.teach_mode import TeachManager
 # Safety
 from safety.estop import EStop
 from safety.fault_manager import FaultManager
-from safety.interlocks import Interlocks
+from safety.interlocks import Interlocks, SlopeAction
 from safety.watchdog import Watchdog
 
 # Navigation
 from navigation.boundary import BoundaryManager
 from navigation.gps_manager import GPSManager
 from navigation.path_planner import PathPlanner
+from navigation.terrain_monitor import TerrainMonitor
 
 # Telemetry
 from telemetry.alerts import AlertMonitor
@@ -241,6 +243,20 @@ class RiverVectorSystem:
         self._identity = Identity(self._bootstrap)
         logger.info("Identity: %s", self._identity)
 
+        # ── 1a. Compute topology ──────────────────────────────────────
+        # This node's place in the unit's compute layout (solo vs split).
+        # core.main IS the control process, so it must own the control role
+        # locally — the control/safety loop is never reached over the network.
+        # Vision-only nodes run `python -m vision.node`, not this entrypoint.
+        self._compute = self._bootstrap.compute.validated()
+        logger.info("Compute topology: %s", self._compute.describe())
+        if not self._compute.owns_role(ROLE_CONTROL):
+            raise ComputeTopologyError(
+                "This node does not own the 'control' role, but core.main is the "
+                "control process. Vision-only nodes must run `python -m vision.node`. "
+                f"Profile: {self._compute.describe()}"
+            )
+
         # ── 2. Safety foundation ──────────────────────────────────────
         self._fault_manager = FaultManager()
         self._estop = EStop(self._fault_manager)
@@ -274,6 +290,7 @@ class RiverVectorSystem:
         self._display: Optional[DisplayManager] = None
         self._gps_manager: Optional[GPSManager] = None
         self._gps_interface = None
+        self._terrain = TerrainMonitor()
         self._watchdog: Optional[Watchdog] = None
         self._boundary: Optional[BoundaryManager] = None
         self._interlocks: Optional[Interlocks] = None
@@ -347,6 +364,7 @@ class RiverVectorSystem:
             presence=self._suite.presence if self._suite else None,
             fault_manager=self._fault_manager,
             config_sync=self._config_sync,
+            terrain=self._terrain,
         )
         self._mode_manager._interlocks = self._interlocks  # late wiring
         self._mode_manager.start()
@@ -396,6 +414,7 @@ class RiverVectorSystem:
                     self._watchdog.kick()
                 if self._gps_interface is not None and hasattr(self._gps_interface, "update"):
                     self._gps_interface.update()
+                self._update_terrain_and_enforce_slope()
                 self._update_display()
                 self._drain_command_queue()
                 self._check_config_version()
@@ -486,6 +505,30 @@ class RiverVectorSystem:
             if self._config_sync.pull():
                 return
 
+    def _build_cameras(self, caps):
+        """
+        Picks the camera implementation based on this node's compute role.
+
+        If this (control) node owns the `vision` role, use the local
+        CameraManager. If vision lives on a peer node (split topology), use a
+        RemoteCameraManager pointed at it. Either way, absent/failed hardware
+        degrades to invalid frames — the rest of the stack is unaffected.
+        """
+        if self._compute.owns_role(ROLE_VISION):
+            sim_cameras = (not caps.has_cameras) or (self._pico and self._pico.sim_mode)
+            return CameraManager(sim_mode=bool(sim_cameras))
+
+        peer_url = self._compute.peer_url(ROLE_VISION)
+        if not peer_url:
+            logger.warning(
+                "Vision role is neither local nor has a peer URL; cameras disabled (sim)."
+            )
+            return CameraManager(sim_mode=True)
+
+        from hardware.remote_camera import RemoteCameraManager
+        logger.info("Cameras: delegating vision to peer node at %s.", peer_url)
+        return RemoteCameraManager(peer_url)
+
     def _build_hardware(self, config: Dict[str, Any]) -> None:
         """Builds all hardware subsystems from the pulled config."""
         hardware = config.get("hardware", {})
@@ -505,8 +548,7 @@ class RiverVectorSystem:
         self._sensors = SensorManager(self._pico) if self._pico else None
         self._relays = RelayManager(self._pico) if self._pico else None
         self._lights = LightManager(self._pico) if self._pico else None
-        sim_cameras = (not caps.has_cameras) or (self._pico and self._pico.sim_mode)
-        self._cameras = CameraManager(sim_mode=bool(sim_cameras))
+        self._cameras = self._build_cameras(caps)
         self._display = DisplayManager(sim_mode=(self._pico is None or self._pico.sim_mode))
         try:
             self._display.connect()
@@ -544,6 +586,7 @@ class RiverVectorSystem:
             gps_manager=self._gps_manager,
             mode_manager=self._mode_manager,
             fault_manager=self._fault_manager,
+            terrain_monitor=self._terrain,
         )
 
         # Path planner + sessions (only meaningful with GPS).
@@ -622,15 +665,34 @@ class RiverVectorSystem:
         return d
 
     def _gps_provider(self) -> Optional[Dict[str, float]]:
-        """Returns current (lat,lng) for teach mode."""
+        """Returns current {lat, lng, alt} for teach mode (alt None without 3-D fix)."""
         if self._gps_manager is None:
             return None
-        if not self._gps_manager.has_fix:
+        pos = self._gps_manager.position
+        if pos is None:
             return None
         return {
-            "lat": float(self._gps_manager.latitude),
-            "lng": float(self._gps_manager.longitude),
+            "lat": float(pos[0]),
+            "lng": float(pos[1]),
+            "alt": self._gps_manager.fix.altitude_m,
         }
+
+    def _update_terrain_and_enforce_slope(self) -> None:
+        """Feeds the latest GPS fix to the terrain monitor and enforces slope limits."""
+        if self._gps_manager is None or self._interlocks is None:
+            return
+        fix = self._gps_manager.fix
+        self._terrain.update(fix.latitude, fix.longitude, fix.altitude_m)
+        result = self._interlocks.enforce_slope(
+            self._terrain.slope_pct, self._mode_manager.mode
+        )
+        if result.alert is not None and self._alert_monitor is not None:
+            self._alert_monitor.emit(result.alert)
+        if result.action == SlopeAction.ESTOP:
+            self._estop.trigger("SLOPE_SEVERE")
+            self._mode_manager.trigger_estop("SLOPE_SEVERE")
+        elif result.action == SlopeAction.HOLD:
+            self._mode_manager.request_hold("SLOPE_LIMIT")
 
     # ──────────────────────────────────────────────────────────────────
     # Command dispatch
