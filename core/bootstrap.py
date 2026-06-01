@@ -27,6 +27,7 @@ import stat
 from dataclasses import asdict, dataclass, field
 from typing import List, Optional
 
+from core.compute_topology import ComputeProfile
 from core.constants import BOOTSTRAP_PATH, KEYSTORE_PATH, PROTOCOL_VERSION
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,9 @@ class BootstrapConfig:
     firmware_version: str = "0.2.0"
     server: ServerUrls = field(default_factory=ServerUrls)
     wifi_networks: List[WifiNetwork] = field(default_factory=list)
+    # Compute topology for THIS node. Absent in older bootstraps → solo
+    # (single node owns every role), which is the historical behavior.
+    compute: ComputeProfile = field(default_factory=ComputeProfile.default_solo)
 
     def is_claimed(self) -> bool:
         """True if the device has completed the claim handshake."""
@@ -80,6 +84,7 @@ class BootstrapConfig:
         d = asdict(self)
         d["server"] = asdict(self.server)
         d["wifi_networks"] = [asdict(n) for n in self.wifi_networks]
+        d["compute"] = self.compute.to_dict()
         return d
 
     @classmethod
@@ -105,6 +110,7 @@ class BootstrapConfig:
                 )
                 for n in wifi_data
             ],
+            compute=ComputeProfile.from_dict(d.get("compute")),
         )
 
 

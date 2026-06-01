@@ -20,5 +20,12 @@
       "psk_encrypted": "",
       "priority": 2
     }
-  ]
+  ],
+  "_compute_comment_": "How this physical box fits the unit's compute layout. Default 'solo' = this one node runs everything; leave as-is for a single machine (a Chromebox, or a lone Pi 5). For a split Pi 5 + Pi 4 build: the control node uses topology=split, roles=[control], peers={vision: http://<pi4-lan-ip>:8090}; the vision node (Pi 4) uses topology=split, roles=[vision], peers={}. Provision via scripts/install.sh --topology / --role / --peer.",
+  "compute": {
+    "node_id": "",
+    "topology": "solo",
+    "roles": ["control", "vision"],
+    "peers": {}
+  }
 }

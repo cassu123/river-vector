@@ -132,6 +132,23 @@ Everything else — hardware specs, safety floors, zones, programs — lives in 
 
 ---
 
+## Compute topology (solo vs split)
+
+The same codebase runs on one node or several, selected by config — no fork:
+
+- **solo** (default, zero-config) — one machine owns every role. A Chromebox or a lone
+  Pi 5 runs the whole stack. Old bootstraps with no `compute` block are treated as solo.
+- **split** — `control` (autonomy + safety, real-time) on the Pi 5; `vision` (cameras +
+  CV) on the Pi 4, reached over the internal LAN. Safety-critical roles are never
+  delegated over the network; if the vision peer is unreachable, cameras degrade to sim.
+
+The control node runs `python -m core.main` (`river-vector.service`); a vision-only node
+runs `python -m vision.node` (`river-vector-vision.service`). Provision via
+`scripts/install.sh install --topology split --role control --peer vision=http://<ip>:8090`.
+See spec §21. Topology lives in each node's `bootstrap.json` `compute` block.
+
+---
+
 ## Connectivity hierarchy
 
 1. **Primary** — `url_primary` (internet → Cloudflare Tunnel → River Song).

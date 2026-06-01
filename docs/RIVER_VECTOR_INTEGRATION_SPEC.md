@@ -1434,4 +1434,92 @@ X-Config-Version: 42
 
 ---
 
+## 21. Adaptable Compute Topology (Addendum — 2026-05-31)
+
+A unit's subsystems may run on **one node or several**, selected by config with no
+code fork. This lets a single capable machine (a Chromebox, or a lone Pi 5) run the
+whole stack, OR split it across the Pi 5 + Pi 4 in the Voyager enclosure — and lets
+you upgrade the compute later without touching River Song.
+
+### 21.1 Concepts
+
+- **Unit** — one logical mower. River Song knows the unit (N cameras, RTK GPS, drive).
+  River Song is **topology-agnostic**: it never knows or cares how compute is wired.
+- **Node** — one physical computer participating in the unit (Pi 5, Pi 4, Chromebox).
+- **Role** — a bundle of subsystems a node owns:
+  - `control` — autonomy, safety, mode manager, command/telemetry channels, drive,
+    GPS/IMU, Pico bridge, e-stop, watchdog. **Safety-critical, hard real-time.**
+  - `vision` — cameras, undistortion, ArUco detection, MJPEG/snapshot serving.
+
+### 21.2 Topologies
+
+- **`solo`** (default, zero-config) — one node owns every role. Historical behavior.
+- **`split`** — `control` on the Pi 5, `vision` on the Pi 4, over the internal LAN.
+
+### 21.3 Where topology lives
+
+Per **node**, in that node's `bootstrap.json` (a physical fact of the box — where the
+cameras are wired), **not** in the per-unit server config:
+
+```json
+"compute": {
+  "node_id": "voyager-ctrl",
+  "topology": "split",
+  "roles": ["control"],
+  "peers": { "vision": "http://10.55.0.2:8090" }
+}
+```
+A solo node: `{"topology":"solo","roles":["control","vision"],"peers":{}}`.
+Absent `compute` block ⇒ solo (old bootstraps keep working unchanged).
+
+### 21.4 Hard rules
+
+1. **Safety-critical roles are never delegated.** A `control` role may never appear in
+   `peers`; the control node must own it locally. The control/safety loop cannot tolerate
+   a network hop. Enforced in `ComputeProfile.validated()` and asserted at boot in
+   `core/main.py` (which IS the control process).
+2. **River Song stays topology-agnostic.** Re-wire boxes freely; the server is untouched.
+3. **Graceful degrade.** If the `vision` peer is unreachable, the control node degrades
+   cameras to sim (invalid frames / no detections) — the same path as missing hardware.
+   Mowing continues; vision-dependent features simply report "no data".
+
+### 21.5 Device-side implementation (River Vector — Claude, complete)
+
+- `core/compute_topology.py` — `ComputeProfile` (roles/topology/peers), validation,
+  `SAFETY_CRITICAL_ROLES`, solo default.
+- `core/bootstrap.py` — `compute` block, backward-compatible.
+- `hardware/remote_camera.py` — `RemoteCameraManager`, an HTTP client mirroring
+  `CameraManager` (capture / capture_undistorted / detect_aruco) against a peer.
+- `vision/node.py` — vision-node service (`python -m vision.node`): stdlib HTTP serving
+  `/health`, `/cameras`, `/camera/{id}/snapshot`, `/camera/{id}/aruco`, `/bird_eye`.
+- `core/main.py` — picks local `CameraManager` vs `RemoteCameraManager` by role; asserts
+  control-locality at boot.
+- `scripts/install.sh` — `--topology` / `--role` / `--peer` / `--node-id` on `install`,
+  plus a `set-compute` command; writes either `river-vector.service` (control) or
+  `river-vector-vision.service` (vision).
+- Tests: `tests/test_compute_topology.py`, `tests/test_remote_camera.py`. Verified with a
+  single-machine loopback (control client fetching real frames from the vision node).
+
+### 21.6 Server-side (River Song — Antigravity, optional, not required)
+
+No server change is required for split mode to work. **Optional future enhancement:** a
+fleet UI panel showing per-node health (control node up, vision node up/last-seen) — the
+device could report node liveness in its telemetry/status payload. Out of scope for v1.
+
+### 21.7 Provisioning quick-reference
+
+```
+# Solo (Chromebox, or lone Pi 5):
+sudo ./scripts/install.sh install
+
+# Split — control node (Pi 5):
+sudo ./scripts/install.sh install --topology split --role control \
+     --peer vision=http://10.55.0.2:8090 --node-id voyager-ctrl
+
+# Split — vision node (Pi 4):
+sudo ./scripts/install.sh install --topology split --role vision --node-id voyager-vision
+```
+
+---
+
 **End of specification.**
