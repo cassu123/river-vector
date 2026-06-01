@@ -35,6 +35,8 @@ class OperatingMode(Enum):
     MANUAL:          Operator-driven or teleoperated.
     AUTO:            Autonomous mowing session active.
     RETURNING_HOME:  Autonomous return-to-home navigation.
+    HOLD:            Graceful safety stop (e.g. slope limit). Motion halted but
+                     NOT an e-stop; recoverable without a hardware reset.
     ESTOP:           Emergency stop active. All motion halted.
     FAULT:           Critical fault preventing operation.
     OFFLINE_REPLAY:  Server unreachable; running cached config, queuing telemetry.
@@ -49,6 +51,7 @@ class OperatingMode(Enum):
     MANUAL = auto()
     AUTO = auto()
     RETURNING_HOME = auto()
+    HOLD = auto()
     ESTOP = auto()
     FAULT = auto()
     OFFLINE_REPLAY = auto()
@@ -171,6 +174,17 @@ class ModeManager:
         """
         logger.critical("Mode manager: ESTOP triggered. Reason: %s", reason)
         self._transition_to(OperatingMode.ESTOP)
+
+    def request_hold(self, reason: str = "") -> None:
+        """
+        Graceful safety stop — halts motion and enters HOLD without an e-stop.
+
+        Used by runtime safety enforcement (e.g. slope limit exceeded). Unlike
+        ESTOP this is recoverable: when the condition clears, the operator/UI
+        can resume. Only meaningful from active-motion states.
+        """
+        logger.warning("Mode manager: HOLD requested. Reason: %s", reason)
+        self._transition_to(OperatingMode.HOLD)
 
     def reset_estop(self) -> bool:
         """

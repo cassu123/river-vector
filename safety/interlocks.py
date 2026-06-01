@@ -21,22 +21,42 @@ verify() time so the latest values always apply.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Optional
 
 from core.constants import (
     ABSOLUTE_MIN_OBSTACLE_CLEARANCE_M,
+    DEFAULT_MAX_SLOPE_PCT,
     DEFAULT_OBSTACLE_CLEARANCE_M,
     DEFAULT_IMU_TILT_CUTOFF_DEG,
     FaultCode,
     MIN_FUEL_PERCENT,
     MIN_VOLTAGE_V,
+    SLOPE_HYSTERESIS_FACTOR,
+    SLOPE_SEVERE_FACTOR,
 )
+from telemetry.alerts import Alert, AlertLevel
 
 logger = logging.getLogger(__name__)
 
 
 class InterlockError(Exception):
     """Raised by Interlocks.verify() when a pre-flight check fails."""
+
+
+class SlopeAction(Enum):
+    """Runtime slope-enforcement decision."""
+    NONE = auto()
+    HOLD = auto()    # graceful stop (recoverable)
+    ESTOP = auto()   # hard e-stop
+
+
+@dataclass
+class SlopeEnforcement:
+    """Result of a runtime slope evaluation: an action plus an optional alert."""
+    action: SlopeAction
+    alert: Optional[Alert] = None
 
 
 class Interlocks:
@@ -58,12 +78,16 @@ class Interlocks:
         presence=None,
         fault_manager=None,
         config_sync=None,
+        terrain=None,
     ) -> None:
         self._sensors = sensor_manager
         self._gps = gps_manager
         self._presence = presence
         self._fault_manager = fault_manager
         self._config_sync = config_sync
+        self._terrain = terrain
+        # Hysteresis state for runtime slope enforcement: 0=clear, 1=hold, 2=estop.
+        self._slope_level = 0
 
     # ──────────────────────────────────────────────────────────────────
     # Public API
@@ -84,6 +108,7 @@ class Interlocks:
         self._check_deck()
         self._check_gps()
         self._check_tilt()
+        self._check_slope()
         self._check_capabilities()
         logger.info("All interlocks passed — AUTO mode permitted.")
 
@@ -96,6 +121,7 @@ class Interlocks:
             return {
                 "min_obstacle_clearance_m": DEFAULT_OBSTACLE_CLEARANCE_M,
                 "imu_tilt_cutoff_deg": DEFAULT_IMU_TILT_CUTOFF_DEG,
+                "max_slope_pct": DEFAULT_MAX_SLOPE_PCT,
                 "min_battery_v_cutoff": MIN_VOLTAGE_V,
                 "operator_presence_required_for_auto": True,
             }
@@ -105,6 +131,7 @@ class Interlocks:
             return {
                 "min_obstacle_clearance_m": DEFAULT_OBSTACLE_CLEARANCE_M,
                 "imu_tilt_cutoff_deg": DEFAULT_IMU_TILT_CUTOFF_DEG,
+                "max_slope_pct": DEFAULT_MAX_SLOPE_PCT,
                 "min_battery_v_cutoff": MIN_VOLTAGE_V,
                 "operator_presence_required_for_auto": True,
             }
@@ -217,6 +244,80 @@ class Interlocks:
                 raise InterlockError(
                     f"Current {axis_name} {value:.1f}° exceeds tilt cutoff {cutoff:.1f}°."
                 )
+
+    def _check_slope(self) -> None:
+        """Refuses AUTO if the current ground slope already exceeds the limit."""
+        if self._terrain is None:
+            return
+        slope = self._terrain.slope_pct
+        if slope is None:
+            return
+        floors = self.get_safety_floors()
+        max_slope = float(floors.get("max_slope_pct", DEFAULT_MAX_SLOPE_PCT))
+        if slope >= max_slope:
+            raise InterlockError(
+                f"Current slope {slope:.1f}% exceeds max {max_slope:.0f}%."
+            )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Runtime slope enforcement (called each loop tick while operating)
+    # ──────────────────────────────────────────────────────────────────
+
+    def enforce_slope(self, slope_pct, current_mode=None) -> SlopeEnforcement:
+        """
+        Evaluates the current slope against the configured limit and returns
+        the enforcement action (with an alert to dispatch, if any).
+
+          slope >= max_slope_pct * 1.5  → ESTOP, critical alert (any mode).
+          slope >= max_slope_pct        → HOLD, warning alert (AUTO/MANUAL only).
+
+        Hysteresis: once enforced, the same level does not re-trigger until the
+        slope drops below max_slope_pct * 0.85. Escalation (HOLD→ESTOP) always
+        fires. The caller (main loop) applies the action and dispatches the alert.
+        """
+        if slope_pct is None:
+            return SlopeEnforcement(SlopeAction.NONE)
+
+        floors = self.get_safety_floors()
+        max_slope = float(floors.get("max_slope_pct", DEFAULT_MAX_SLOPE_PCT))
+        severe = max_slope * SLOPE_SEVERE_FACTOR
+        clear = max_slope * SLOPE_HYSTERESIS_FACTOR
+        mode_name = getattr(current_mode, "name", str(current_mode) if current_mode else "")
+
+        # Dropped clear of the band → reset; safe to re-trigger later.
+        if slope_pct < clear:
+            self._slope_level = 0
+            return SlopeEnforcement(SlopeAction.NONE)
+
+        if slope_pct >= severe:
+            desired = 2
+        elif slope_pct >= max_slope:
+            desired = 1
+        else:
+            # In the hysteresis band [clear, max): hold steady, no new action.
+            return SlopeEnforcement(SlopeAction.NONE)
+
+        if desired <= self._slope_level:
+            return SlopeEnforcement(SlopeAction.NONE)
+
+        msg = f"{slope_pct:.1f}% — limit {max_slope:.0f}%"
+        if desired == 2:
+            self._slope_level = 2
+            return SlopeEnforcement(
+                SlopeAction.ESTOP,
+                Alert(level=AlertLevel.CRITICAL, title="Severe slope exceeded",
+                      message=msg, fault_code=FaultCode.SLOPE_EXCEEDED),
+            )
+
+        # desired == 1 → graceful HOLD, only while actively moving.
+        if mode_name in ("AUTO", "MANUAL"):
+            self._slope_level = 1
+            return SlopeEnforcement(
+                SlopeAction.HOLD,
+                Alert(level=AlertLevel.WARNING, title="Slope limit exceeded",
+                      message=msg, fault_code=FaultCode.SLOPE_EXCEEDED),
+            )
+        return SlopeEnforcement(SlopeAction.NONE)
 
     def _check_capabilities(self) -> None:
         """Refuses AUTO on units that do not support autonomous operation."""

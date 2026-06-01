@@ -245,10 +245,10 @@ class RiverSongClient:
     def push_teach_waypoints(
         self,
         zone_name: str,
-        waypoints: List[Dict[str, float]],
+        waypoints: List[List[Optional[float]]],
         finalize: bool = False,
     ) -> bool:
-        """Pushes accumulated boundary waypoints during teach mode."""
+        """Pushes accumulated boundary waypoints ([lat, lng, alt_m] triplets) during teach mode."""
         return self._safe_post("/zones/teach", {
             "unit_id": self._identity.unit_id,
             "zone_name": zone_name,

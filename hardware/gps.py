@@ -24,7 +24,8 @@ class GPSFix:
     has_fix: bool = False
     latitude: Optional[float] = None
     longitude: Optional[float] = None
-    altitude_m: Optional[float] = None
+    altitude_m: Optional[float] = None             # WGS-84 ellipsoid metres; None until 3D fix
+    altitude_accuracy_m: Optional[float] = None    # vertical accuracy estimate (m), None until 3D fix
     heading_deg: Optional[float] = None
     speed_ms: Optional[float] = None
     accuracy_m: float = 999.0

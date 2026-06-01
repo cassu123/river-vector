@@ -30,8 +30,11 @@ from core.constants import TEACH_CAPTURE_HZ, TEACH_WAYPOINT_BUFFER_MAX
 logger = logging.getLogger(__name__)
 
 
-# GPS provider: returns current (lat, lng) or None if no fix.
+# GPS provider: returns {"lat","lng","alt"} (alt may be None) or None if no fix.
 GPSProvider = Callable[[], Optional[Dict[str, float]]]
+
+# A captured waypoint is a [lat, lng, alt_m] triplet; alt_m is None without a 3-D fix.
+Waypoint = List[Optional[float]]
 
 
 class TeachSession:
@@ -58,8 +61,8 @@ class TeachSession:
         self._api = api_client
         self._gps = gps_provider
         self._lock = threading.Lock()
-        self._buffer: List[Dict[str, float]] = []
-        self._unpushed: List[Dict[str, float]] = []
+        self._buffer: List[Waypoint] = []
+        self._unpushed: List[Waypoint] = []
         self._running = False
         self._capture_thread: Optional[threading.Thread] = None
         self._push_thread: Optional[threading.Thread] = None
@@ -152,6 +155,13 @@ class TeachSession:
             self._flush_batch()
 
     def _add_waypoint(self, point: Dict[str, float]) -> None:
+        # Record a [lat, lng, alt_m] triplet. alt_m is None when the GPS has no
+        # 3-D fix; the server stores the triplet either way and handles None.
+        triplet: Waypoint = [
+            point.get("lat"),
+            point.get("lng"),
+            point.get("alt"),
+        ]
         with self._lock:
             if len(self._buffer) >= TEACH_WAYPOINT_BUFFER_MAX:
                 logger.warning(
@@ -159,8 +169,8 @@ class TeachSession:
                     TEACH_WAYPOINT_BUFFER_MAX,
                 )
                 return
-            self._buffer.append(point)
-            self._unpushed.append(point)
+            self._buffer.append(triplet)
+            self._unpushed.append(triplet)
 
     def _flush_batch(self) -> None:
         with self._lock:

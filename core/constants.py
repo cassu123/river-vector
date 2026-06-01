@@ -84,11 +84,20 @@ ABSOLUTE_MIN_IMU_TILT_CUTOFF_DEG = 10.0
 ABSOLUTE_MAX_IMU_TILT_CUTOFF_DEG = 25.0
 ABSOLUTE_MIN_WATCHDOG_TIMEOUT_MS = 250
 ABSOLUTE_MAX_WATCHDOG_TIMEOUT_MS = 2000
+ABSOLUTE_MIN_SLOPE_PCT = 5.0
+ABSOLUTE_MAX_SLOPE_PCT = 60.0
 
 # Default safety floor values applied when no per-unit config is present.
 DEFAULT_OBSTACLE_CLEARANCE_M = 0.20
 DEFAULT_IMU_TILT_CUTOFF_DEG = 15.0
 DEFAULT_WATCHDOG_TIMEOUT_MS = 500
+DEFAULT_MAX_SLOPE_PCT = 30.0
+
+# Slope (terrain) monitoring + enforcement.
+SLOPE_BUFFER_SIZE = 5             # rolling GPS-fix buffer for slope calc
+SLOPE_MIN_HORIZONTAL_M = 0.1      # ignore sub-decimetre moves (stationary noise)
+SLOPE_SEVERE_FACTOR = 1.5         # severe (e-stop) threshold = max * 1.5
+SLOPE_HYSTERESIS_FACTOR = 0.85    # must drop below max * 0.85 before re-trigger
 
 # Manual control: each manual.* command has a max effective duration so
 # the device fails safe when UI heartbeats stop.
@@ -120,6 +129,7 @@ class FaultCode(str, Enum):
     GPS_ACCURACY_LOW = "GPS_ACCURACY_LOW"
     OBSTACLE_DETECTED = "OBSTACLE_DETECTED"
     TILT_EXCEEDED = "TILT_EXCEEDED"
+    SLOPE_EXCEEDED = "SLOPE_EXCEEDED"
     OPERATOR_ABSENT = "OPERATOR_ABSENT"
     BOUNDARY_BREACH = "BOUNDARY_BREACH"
 

@@ -37,6 +37,9 @@ class TelemetrySnapshot:
     speed_mps: Optional[float] = None
     gps_fix_quality: int = 0
     gps_accuracy_m: Optional[float] = None
+    altitude_m: Optional[float] = None
+    altitude_accuracy_m: Optional[float] = None
+    slope_pct: Optional[float] = None
 
     # Power
     battery_voltage_v: Optional[float] = None
@@ -73,6 +76,9 @@ class TelemetrySnapshot:
             "speed_mps": self.speed_mps,
             "gps_fix_quality": self.gps_fix_quality,
             "gps_accuracy_m": self.gps_accuracy_m,
+            "altitude_m": self.altitude_m,
+            "altitude_accuracy_m": self.altitude_accuracy_m,
+            "slope_pct": self.slope_pct,
             "battery_voltage_v": self.battery_voltage_v,
             "fuel_percent": self.fuel_percent,
             "engine_temp_c": self.engine_temp_c,
@@ -113,12 +119,14 @@ class TelemetryCollector:
         gps_manager=None,
         mode_manager=None,
         fault_manager=None,
+        terrain_monitor=None,
     ) -> None:
         self._unit_id = unit_id
         self._sensors = sensor_manager
         self._gps = gps_manager
         self._mode_manager = mode_manager
         self._fault_manager = fault_manager
+        self._terrain = terrain_monitor
         self._lock = threading.Lock()
         self._snapshot = TelemetrySnapshot(unit_id=unit_id)
 
@@ -155,9 +163,15 @@ class TelemetryCollector:
             snap.latitude = fix.latitude
             snap.longitude = fix.longitude
             snap.heading_deg = fix.heading_deg
-            snap.speed_mps = fix.speed_mps
+            snap.speed_mps = fix.speed_ms
             snap.gps_fix_quality = fix.fix_quality
             snap.gps_accuracy_m = fix.accuracy_m
+            snap.altitude_m = fix.altitude_m
+            snap.altitude_accuracy_m = fix.altitude_accuracy_m
+
+        # Terrain (slope) — device-calculated from GPS altitude history.
+        if self._terrain is not None:
+            snap.slope_pct = self._terrain.slope_pct
 
         # Mode
         if self._mode_manager:

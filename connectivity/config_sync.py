@@ -35,12 +35,15 @@ from typing import Any, Dict, Optional
 
 from core.constants import (
     ABSOLUTE_MAX_IMU_TILT_CUTOFF_DEG,
+    ABSOLUTE_MAX_SLOPE_PCT,
     ABSOLUTE_MAX_WATCHDOG_TIMEOUT_MS,
     ABSOLUTE_MIN_IMU_TILT_CUTOFF_DEG,
     ABSOLUTE_MIN_OBSTACLE_CLEARANCE_M,
+    ABSOLUTE_MIN_SLOPE_PCT,
     ABSOLUTE_MIN_WATCHDOG_TIMEOUT_MS,
     CONFIG_CACHE_PATH,
     DEFAULT_IMU_TILT_CUTOFF_DEG,
+    DEFAULT_MAX_SLOPE_PCT,
     DEFAULT_OBSTACLE_CLEARANCE_M,
     DEFAULT_WATCHDOG_TIMEOUT_MS,
 )
@@ -311,6 +314,10 @@ class ConfigSync:
         elif wd > ABSOLUTE_MAX_WATCHDOG_TIMEOUT_MS:
             wd = ABSOLUTE_MAX_WATCHDOG_TIMEOUT_MS
         floors["watchdog_timeout_ms"] = wd
+
+        slope = float(floors.get("max_slope_pct", DEFAULT_MAX_SLOPE_PCT))
+        slope = max(ABSOLUTE_MIN_SLOPE_PCT, min(ABSOLUTE_MAX_SLOPE_PCT, slope))
+        floors["max_slope_pct"] = slope
 
         sanitized = dict(config)
         sanitized["safety_floors"] = floors

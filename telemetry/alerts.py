@@ -117,6 +117,16 @@ class AlertMonitor:
         """
         self._handlers.append(handler)
 
+    def emit(self, alert: Alert) -> None:
+        """
+        Dispatches a caller-constructed alert (not fault-derived).
+
+        Used by runtime safety enforcement that raises its own alerts
+        (e.g. the slope guard). Goes through the same dispatch path —
+        log, push to API, fire handlers.
+        """
+        self._dispatch(alert)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
